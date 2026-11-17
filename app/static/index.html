@@ -146,6 +146,42 @@
       <ol class="history-list" id="history-list"></ol>
       <p class="empty" id="history-empty">还没有确认过前缀。</p>
     </div>
+
+    <div class="panel align-panel">
+      <div class="panel-head">
+        <h2>5. 参考字幕对齐</h2>
+        <span class="hint" id="align-scope">未加载会话</span>
+      </div>
+      <div class="align-editor">
+        <label class="field grow">
+          <span>参考字幕 <em>（词表内单字，至多 32 字；连续同字必须经 blank 分隔，零概率路径不可达）</em></span>
+          <input type="text" id="align-input" autocomplete="off" spellcheck="false" maxlength="32" placeholder="例如：啊波">
+        </label>
+        <button class="ghost" id="align-fill" type="button" disabled>填入当前字幕</button>
+        <button class="primary" id="align-btn" type="button" disabled>对齐到已推进帧</button>
+      </div>
+      <p class="error" id="align-error" hidden></p>
+      <p class="notice" id="align-notice" hidden></p>
+      <div class="align-result" id="align-result" hidden>
+        <div class="align-meta">
+          <span id="align-summary"></span>
+          <span class="stale-badge" id="align-stale" hidden>已过期：推进帧或修改参考字幕后需重新对齐</span>
+        </div>
+        <table class="beam-table align-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>字</th>
+              <th class="num">最早起帧</th>
+              <th class="num">最晚止帧</th>
+              <th class="num">路径 log P</th>
+            </tr>
+          </thead>
+          <tbody id="align-body"></tbody>
+        </table>
+        <p class="hint">起 / 止帧为该字在最优路径中实际发声的帧（不含前后 blank），取自所有同分最优路径的最早 / 最晚值；帧号从 0 起。</p>
+      </div>
+    </div>
   </section>
 </main>
 

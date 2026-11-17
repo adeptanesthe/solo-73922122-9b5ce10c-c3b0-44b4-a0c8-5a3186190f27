@@ -68,6 +68,11 @@ class UndoBody(BaseModel):
     session_id: str
 
 
+class AlignBody(BaseModel):
+    session_id: str
+    text: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 
@@ -264,6 +269,24 @@ async def confirm_endpoint(body: ConfirmBody) -> dict:
 async def undo_endpoint(body: UndoBody) -> dict:
     session = _session_or_404(body.session_id)
     return await _run_op(session, state_module.undo)
+
+
+@app.post("/api/align")
+async def align_endpoint(body: AlignBody) -> dict:
+    """Forced-align a reference subtitle to the frames consumed so far.
+
+    Read-only: queued on the session's ordered worker like the mutating
+    operations, so it observes a consistent frame boundary.  The response
+    echoes the reference text and the frame boundary it was computed from,
+    letting the UI keep the last result on screen (marked stale once frames
+    advance or the text is edited) and discard late replies.
+    """
+    session = _session_or_404(body.session_id)
+    future = manager.submit(session, state_module.align, body.text)
+    try:
+        return await asyncio.wrap_future(future)
+    except SessionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

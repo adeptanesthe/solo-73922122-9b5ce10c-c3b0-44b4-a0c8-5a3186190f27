@@ -186,6 +186,91 @@ def test_sample_creates_working_session(client):
 def test_unknown_session_is_404(client):
     assert client.get("/api/sessions/nope").status_code == 404
     assert client.post("/api/advance", json={"session_id": "nope", "to_frame": 1}).status_code == 404
+    assert client.post("/api/align", json={"session_id": "nope", "text": "a"}).status_code == 404
+
+
+# --------------------------------------------------------------------- align
+
+
+def test_align_endpoint_happy_path(client):
+    session = create(client)
+    sid = session["session_id"]
+
+    # Before any frame is consumed the endpoint answers with a hint, not an error.
+    response = client.post("/api/align", json={"session_id": sid, "text": "a"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["aligned"] is False
+    assert payload["frame"] == 0
+    assert payload["text"] == "a"
+    assert payload["message"]
+
+    client.post("/api/advance", json={"session_id": sid, "to_frame": 5})
+    response = client.post("/api/align", json={"session_id": sid, "text": "ab"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["aligned"] is True
+    assert payload["frame"] == 5
+    assert payload["text"] == "ab"
+    assert isinstance(payload["logp"], float)
+    chars = payload["characters"]
+    assert [c["char"] for c in chars] == ["a", "b"]
+    for c in chars:
+        assert 0 <= c["start"] <= c["end"] <= 4
+    # per-character starts/ends strictly increase along the text
+    assert chars[0]["start"] < chars[1]["start"]
+    assert chars[0]["end"] < chars[1]["end"]
+
+
+def test_align_endpoint_deterministic_spans(client):
+    frames = [
+        [0.9, 0.1, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.9, 0.05, 0.05],
+        [0.0, 0.0, 1.0],
+    ]
+    session = create(client, frames=frames)
+    sid = session["session_id"]
+    client.post("/api/advance", json={"session_id": sid, "to_frame": 5})
+    payload = client.post("/api/align", json={"session_id": sid, "text": "ab"}).json()
+    assert payload["aligned"] is True
+    assert [(c["start"], c["end"]) for c in payload["characters"]] == [(1, 2), (4, 4)]
+
+
+def test_align_unalignable_returns_hint_not_error(client):
+    # "aa" needs a blank frame between the two a's; these frames have none.
+    frames = [[0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+    session = create(client, frames=frames)
+    sid = session["session_id"]
+    client.post("/api/advance", json={"session_id": sid, "to_frame": 3})
+    response = client.post("/api/align", json={"session_id": sid, "text": "aa"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["aligned"] is False
+    assert payload["logp"] is None
+    assert payload["characters"] == []
+    assert "blank" in payload["message"]
+
+
+def test_align_rejects_invalid_text(client):
+    session = create(client)
+    sid = session["session_id"]
+    client.post("/api/advance", json={"session_id": sid, "to_frame": 2})
+    for text in ("", "a" * 33, "zzz", "<blank>"):
+        response = client.post("/api/align", json={"session_id": sid, "text": text})
+        assert response.status_code == 409, (text, response.text)
+
+
+def test_align_does_not_change_session_state(client):
+    session = create(client)
+    sid = session["session_id"]
+    client.post("/api/advance", json={"session_id": sid, "to_frame": 4})
+    before = client.get(f"/api/sessions/{sid}").json()
+    response = client.post("/api/align", json={"session_id": sid, "text": "ab"})
+    assert response.status_code == 200
+    after = client.get(f"/api/sessions/{sid}").json()
+    assert after == before
 
 
 def test_concurrent_ops_apply_in_order(client):

@@ -34,6 +34,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 
+from .align import forced_align
 from .decoder import (
     Beam,
     CTCBeamDecoder,
@@ -50,6 +51,7 @@ class SessionError(RuntimeError):
 
 MAX_FRAMES = 2000
 MAX_EXTRA_TOKENS = 8
+MAX_ALIGN_CHARS = 32
 
 
 @dataclass
@@ -436,3 +438,73 @@ def undo(session: Session) -> None:
     session.beams = beams
     session.revision += 1
     session.error = None
+
+
+# ---------------------------------------------------------------------------
+# Reference-text alignment.  Read-only: it never mutates the session, so it
+# also runs on the session's single worker to see a consistent snapshot of the
+# consumed frames.  The response carries the frame boundary and the reference
+# text it was computed from; the UI keeps the last result visible (marked
+# stale once frames advance or the text changes) and ignores late replies.
+
+
+def align(session: Session, text: str) -> dict:
+    """Forced-align a reference subtitle to the frames consumed so far.
+
+    ``text`` may hold at most ``MAX_ALIGN_CHARS`` in-vocabulary characters.
+    Returns a JSON-safe dict with the per-character earliest start / latest
+    end frame over all tied best paths and the best path's log probability.
+    An unalignable text (no positive-probability path) is reported with
+    ``aligned: False`` and a hint, not an exception; only an invalid request
+    (empty, too long, out-of-vocabulary) raises :class:`SessionError`.
+    """
+    if not isinstance(text, str):
+        raise SessionError("参考文本必须是字符串")
+    if not text:
+        raise SessionError("参考文本不能为空")
+    if len(text) > MAX_ALIGN_CHARS:
+        raise SessionError(f"参考文本最多 {MAX_ALIGN_CHARS} 字")
+    token_index = session.decoder._token_index
+    label_ids: List[int] = []
+    for ch in text:
+        index = token_index.get(ch)
+        if index is None or index == 0:
+            raise SessionError(f"参考文本包含词表外字符：{ch!r}")
+        label_ids.append(index)
+
+    frame = session.next_frame
+    payload = {
+        "session_id": session.id,
+        "revision": session.revision,
+        "frame": frame,
+        "text": text,
+        "characters": [],
+        "logp": None,
+    }
+    if frame == 0:
+        return {
+            **payload,
+            "aligned": False,
+            "message": "尚未推进任何帧，没有可用于对齐的声学帧",
+        }
+    result = forced_align(session.frames[:frame], label_ids)
+    if not result["aligned"]:
+        return {
+            **payload,
+            "aligned": False,
+            "message": (
+                "在已推进的帧上不存在能折叠为该文本的正概率路径"
+                "（连续同字之间需要 blank 帧分隔，且途经帧的概率不能为 0；"
+                "也可能需要继续推进更多帧）"
+            ),
+        }
+    return {
+        **payload,
+        "aligned": True,
+        "logp": float(result["logp"]),
+        "characters": [
+            {"index": i, "char": ch, "start": start, "end": end}
+            for i, (ch, (start, end)) in enumerate(zip(text, result["spans"]))
+        ],
+        "message": None,
+    }

@@ -118,6 +118,52 @@ check("连续推进到结尾", $("progress-text").textContent.startsWith("15 / 1
 await until(() => $("stop-btn").hidden, "run loop finished");
 check("运行结束停止按钮隐藏", $("stop-btn").hidden);
 
+// 8.5 reference-subtitle alignment on the fully advanced sample
+$("align-input").value = "aab";
+$("align-btn").click();
+await until(() => !$("align-result").hidden && $("align-body").children.length === 3, "align result");
+check("对齐结果逐字成行", $("align-body").children.length === 3, `${$("align-body").children.length} 行`);
+check("结果保留原文本与帧号",
+  $("align-summary").textContent.includes("「aab」") && $("align-summary").textContent.includes("第 15 帧边界"),
+  $("align-summary").textContent);
+check("新鲜结果无过期标记", $("align-stale").hidden);
+const starts = [...$("align-body").children].map((tr) => Number(tr.children[2].textContent));
+const ends = [...$("align-body").children].map((tr) => Number(tr.children[3].textContent));
+check("起止帧为合法帧号",
+  starts.every((v, i) => v >= 0 && v <= ends[i] && ends[i] < 15) && starts.every((v, i) => i === 0 || v > starts[i - 1]),
+  `起帧 ${starts} 止帧 ${ends}`);
+check("逐字路径 log P 有数值", [...$("align-body").children].every((tr) => tr.children[4].textContent !== "—"));
+
+// editing the reference text marks the kept result stale, restoring clears it
+$("align-input").value = "ab";
+$("align-input").dispatchEvent(new window.Event("input"));
+check("改动参考文本后旧结果标为过期", !$("align-stale").hidden);
+$("align-input").value = "aab";
+$("align-input").dispatchEvent(new window.Event("input"));
+check("恢复文本后过期标记消失", $("align-stale").hidden);
+
+// 8.6 advancing frames marks the kept alignment stale
+const blankBtn = [...$("sample-buttons").children].find((b) => b.textContent.includes("blank_heavy"));
+blankBtn.click();
+await until(() => $("progress-text").textContent.startsWith("0 / 21"), "blank heavy loaded");
+check("新会话清空旧对齐结果", $("align-result").hidden);
+$("step-btn").click();
+await until(() => $("progress-text").textContent.startsWith("5 / 21"), "advance 5");
+$("align-input").value = "啊";
+$("align-btn").click();
+await until(() => !$("align-result").hidden && $("align-body").children.length === 1, "align 啊");
+check("推进前对齐结果新鲜", $("align-stale").hidden);
+const summaryBefore = $("align-summary").textContent;
+$("step-btn").click();
+await until(() => $("progress-text").textContent.startsWith("10 / 21"), "advance 10");
+check("推进帧后旧结果标为过期", !$("align-stale").hidden);
+check("过期结果仍保留原文本与帧号",
+  $("align-summary").textContent === summaryBefore && $("align-summary").textContent.includes("第 5 帧边界"),
+  $("align-summary").textContent);
+$("align-btn").click();
+await until(() => $("align-stale").hidden && $("align-summary").textContent.includes("第 10 帧边界"), "re-aligned");
+check("重新对齐后结果刷新", $("align-summary").textContent.includes("第 10 帧边界"), $("align-summary").textContent);
+
 // 9. zero-probability sample shows -∞ without NaN
 const zeroBtn = [...$("sample-buttons").children].find((b) => b.textContent.includes("sparse_zero"));
 zeroBtn.click();
@@ -128,6 +174,18 @@ await sleep(300);
 const bodyText = $("beam-body").textContent;
 check("零概率样例无 NaN", !bodyText.includes("NaN"), bodyText.slice(0, 120));
 check("零概率样例显示 -∞", bodyText.includes("-∞") || $("frame-probs").textContent.includes("0.000"));
+
+// 9.5 unalignable reference shows a hint and keeps the (empty) result area
+$("align-input").value = "z";
+$("align-btn").click();
+await until(() => !$("align-notice").hidden, "align hint");
+check("无法完整对齐时给出提示", $("align-notice").textContent.includes("无法完整对齐"), $("align-notice").textContent.slice(0, 70));
+check("提示时不显示结果表", $("align-result").hidden);
+$("align-input").value = "xy";
+$("align-btn").click();
+await until(() => !$("align-result").hidden && $("align-body").children.length === 2, "align xy");
+check("可对齐文本显示逐字表格", $("align-body").children.length === 2);
+check("对齐成功后提示消失", $("align-notice").hidden);
 
 // 10. no uncaught UI errors
 check("无未捕获脚本错误", errors.length === 0, errors.join(" | ").slice(0, 200));

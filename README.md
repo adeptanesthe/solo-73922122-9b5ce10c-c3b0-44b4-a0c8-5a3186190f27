@@ -38,6 +38,10 @@ python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
    兼容候选，后续推进不会再把不兼容路径带回束中。
 5. **撤销确认**：恢复「未做该次确认时」在当前帧应有的束与分数（不是简单解除文字限制），
    已推进的帧不会回退。
+6. **参考字幕对齐**：在「参考字幕对齐」面板输入校订后的字幕（词表内单字，至多 32 字），
+   点击「对齐到已推进帧」。页面在已推进的帧上求能折叠成全文的最优（Viterbi）路径，
+   逐字列出所有同分最优路径中该字最早的起帧、最晚的止帧以及路径对数概率，便于复查
+   连读与停顿处的时间边界。「填入当前字幕」可一键取当前最佳候选作为参考。
 
 ## 关键语义与实现
 
@@ -77,6 +81,21 @@ python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 - 操作失败（非法前缀、帧越界、会话过期等）返回 4xx，且**不修改**会话；
   前端保留原字幕与进度，仅显示错误信息。
 
+### 参考字幕对齐
+
+- 对齐是**只读**操作：在会话的有序 worker 上取当时已推进帧的一致快照，不改变会话
+  状态（`revision` 不变）。对齐范围始终为已推进的 `next_frame` 帧（帧号 `0 … next_frame-1`）。
+- 算法为 CTC 强制对齐：在扩展标签序列 `blank, y1, blank, …, yL, blank` 上做 Viterbi
+  （max-plus）动态规划，得到能折叠成参考全文的最高概率路径；连续同字必须经 blank
+  分隔，途经零概率帧的路径不可达。再用前向 / 后向分数判定「同分最优路径经过哪些
+  状态」，逐字取所有同分最优路径中进入该字标签状态的最早帧（起帧）与离开的最晚帧
+  （止帧）。起 / 止帧是该字实际发声的帧，不含前后 blank。
+- 不存在正概率路径时返回 `aligned: false` 与提示（HTTP 200），只有非法输入
+  （空文本、超过 32 字、词表外字符）返回 409。
+- 前端 保留最近一次结果及其原文本与帧号：推进帧或改动参考文本不会清除它，只会
+  将其标记为「已过期」；对齐请求带序号，迟到的响应（已有更新请求或会话已更换）
+  会被丢弃，不会充作当前结果。无法对齐时给出提示，同时保留上一次成功的结果表。
+
 ## API 摘要
 
 | 方法 | 路径 | 说明 |
@@ -90,7 +109,12 @@ python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 | POST | `/api/peek` | `{session_id, frame}` 回放已推进帧的候选 |
 | POST | `/api/confirm` | `{session_id, prefix}` 延长已确认前缀 |
 | POST | `/api/undo` | 撤销最近一次确认 |
+| POST | `/api/align` | `{session_id, text}` 参考字幕对齐到已推进帧 |
 | GET | `/api/samples`、`/api/samples/{name}` | 内置样例 |
+
+`/api/align` 的 `text` 为至多 32 个词表内单字。响应含 `aligned`、`frame`（对齐所用的
+帧边界）、`text`（原参考文本）、`logp`（最优路径对数概率）与 `characters[]`
+（每字的 `start` / `end` 帧号，0 起，含端点）；`aligned: false` 时附 `message` 提示。
 
 状态中的 `beams[].logp_blank` / `logp_nonblank` 为 `null` 表示 `-∞`（JSON 无 `-Infinity`）。
 `prefix_scores` 是确认时记录的末字 blank / 非 blank 路径概率（以及完整前缀分数
@@ -99,7 +123,7 @@ python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ## 测试
 
 ```bash
-python3 -m pytest -q tests            # 单元 + HTTP + 并发排序测试（37 项）
+python3 -m pytest -q tests            # 单元 + HTTP + 并发排序 + 对齐测试（53 项）
 python3 scripts/make_samples.py       # 重新生成内置样例
 ```
 
@@ -111,7 +135,8 @@ JSDOM_DIR=/tmp/uitest node tests/ui_smoke.mjs http://127.0.0.1:8000
 ```
 
 该脚本使用 jsdom 驱动真实页面，覆盖：样例载入、分块推进、确认前缀、撤销后进度保留、
-非法确认的错误提示、历史帧只读回放、连续推进到结尾、零概率样例不出现 NaN。
+非法确认的错误提示、历史帧只读回放、连续推进到结尾、零概率样例不出现 NaN，以及参考
+字幕对齐（逐字起止帧、推进帧 / 改动文本后的过期标记、无法对齐的提示）。
 
 ## 内置样例
 

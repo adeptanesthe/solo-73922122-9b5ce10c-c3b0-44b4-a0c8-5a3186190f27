@@ -53,6 +53,16 @@
     frameProbs: $("frame-probs"),
     historyList: $("history-list"),
     historyEmpty: $("history-empty"),
+    alignInput: $("align-input"),
+    alignFill: $("align-fill"),
+    alignBtn: $("align-btn"),
+    alignError: $("align-error"),
+    alignNotice: $("align-notice"),
+    alignResult: $("align-result"),
+    alignSummary: $("align-summary"),
+    alignStale: $("align-stale"),
+    alignBody: $("align-body"),
+    alignScope: $("align-scope"),
     busy: $("busy"),
     busyText: $("busy-text"),
   };
@@ -70,6 +80,12 @@
     // Behind the scenes: the last shown state is kept while a request is in
     // flight, so a failed operation leaves the subtitles and progress intact.
     peekLive: false,
+    // Reference-subtitle alignment.  `seq` invalidates late responses: only
+    // the newest request may update `result` / `failure`.  Both keep the
+    // original text and frame boundary they were computed from, so the panel
+    // can keep showing them (marked stale) after frames advance or the
+    // reference text is edited.
+    align: { seq: 0, result: null, failure: null },
   };
 
   // ---------------------------------------------------------------- helpers
@@ -148,6 +164,8 @@
     els.runBtn.disabled = !ready || atEnd || state.running;
     els.restartBtn.disabled = !ready || state.running;
     els.applyPrefix.disabled = !ready;
+    els.alignBtn.disabled = !ready;
+    els.alignFill.disabled = !ready;
     els.stopBtn.hidden = !state.running;
     els.resetBtn.disabled = !ready;
   }
@@ -193,6 +211,9 @@
     state.snapshot = null;
     state.loadedSample = sampleName;
     state.peekLive = true;
+    state.align = { seq: 0, result: null, failure: null };
+    els.alignInput.value = "";
+    hideAlignError();
     applyState(payload, { force: true });
     if (state.snapshot) {
       els.peekFrame.value = "0";
@@ -249,6 +270,7 @@
     renderHistory(snap);
     renderFrameProbs(snap.frame_info);
     els.prefixInput.placeholder = prefix ? `当前前缀：${prefix}` : "例如：啊";
+    renderAlign();
     updateButtons();
     updateStatusFromSnapshot();
   }
@@ -355,6 +377,112 @@
       cell.append(tok, val);
       cell.title = `log P = ${info.log_probs && info.log_probs[index] !== null ? Number(info.log_probs[index]).toFixed(4) : "-∞"}`;
       els.frameProbs.appendChild(cell);
+    });
+  }
+
+  // ------------------------------------------------------------- alignment
+
+  function showAlignError(message) {
+    if (!message) { hideAlignError(); return; }
+    els.alignError.hidden = false;
+    els.alignError.textContent = message;
+  }
+
+  function hideAlignError() {
+    els.alignError.hidden = true;
+    els.alignError.textContent = "";
+  }
+
+  // A kept alignment result / failure is stale once the frame boundary moved
+  // or the reference text in the input no longer matches the computed one.
+  function isAlignStale(entry) {
+    if (!entry || !state.snapshot) return false;
+    if ((state.snapshot.next_frame || 0) !== entry.frame) return true;
+    return els.alignInput.value.trim() !== entry.text;
+  }
+
+  function renderAlign() {
+    const snap = state.snapshot;
+    const ready = !!state.sessionId && !!snap;
+    els.alignBtn.disabled = !ready;
+    els.alignFill.disabled = !ready;
+    els.alignScope.textContent = ready
+      ? `对齐范围：已推进的 ${snap.next_frame} 帧（帧 0–${Math.max(0, snap.next_frame - 1)}）`
+      : "未加载会话";
+
+    const failure = state.align.failure;
+    if (failure) {
+      els.alignNotice.hidden = false;
+      els.alignNotice.textContent =
+        `无法完整对齐「${failure.text}」（第 ${failure.frame} 帧边界）：${failure.message}` +
+        (isAlignStale(failure) ? "（该提示已过期）" : "");
+    } else {
+      els.alignNotice.hidden = true;
+      els.alignNotice.textContent = "";
+    }
+
+    const result = state.align.result;
+    if (!result) {
+      els.alignResult.hidden = true;
+      return;
+    }
+    els.alignResult.hidden = false;
+    els.alignSummary.textContent =
+      `文本「${result.text}」 · 对齐于第 ${result.frame} 帧边界 · 路径 log P = ${fmt(result.logp)}`;
+    els.alignStale.hidden = !isAlignStale(result);
+
+    els.alignBody.innerHTML = "";
+    (result.characters || []).forEach((entry, index) => {
+      const tr = document.createElement("tr");
+      const idx = document.createElement("td");
+      idx.textContent = String(index + 1);
+      const ch = document.createElement("td");
+      ch.textContent = entry.char;
+      const start = document.createElement("td");
+      start.className = "num";
+      start.textContent = String(entry.start);
+      const end = document.createElement("td");
+      end.className = "num";
+      end.textContent = String(entry.end);
+      const logp = document.createElement("td");
+      logp.className = "num";
+      logp.textContent = fmt(result.logp);
+      tr.append(idx, ch, start, end, logp);
+      els.alignBody.appendChild(tr);
+    });
+  }
+
+  async function runAlign() {
+    if (!state.sessionId) return;
+    const text = els.alignInput.value.trim();
+    hideAlignError();
+    if (!text) { showAlignError("请输入参考字幕"); return; }
+    if ([...text].length > 32) { showAlignError("参考字幕最多 32 字"); return; }
+    // Only the newest request may update the panel: a response that arrives
+    // after a newer request (or after the session was replaced) is dropped,
+    // so a late computation can never pose as the current result.
+    const seq = ++state.align.seq;
+    const generation = state.generation;
+    const sessionId = state.sessionId;
+    await withBusy("对齐参考字幕…", async () => {
+      try {
+        const payload = await api("/api/align", {
+          method: "POST",
+          body: JSON.stringify({ session_id: sessionId, text }),
+        });
+        if (seq !== state.align.seq || generation !== state.generation || sessionId !== state.sessionId) return;
+        if (payload.aligned) {
+          state.align.result = payload;
+          state.align.failure = null;
+        } else {
+          // Unalignable: show the hint but keep the last successful result.
+          state.align.failure = payload;
+        }
+        renderAlign();
+      } catch (error) {
+        if (seq !== state.align.seq || generation !== state.generation || sessionId !== state.sessionId) return;
+        showAlignError(`对齐失败：${error.message}（已有结果保持不变）`);
+      }
     });
   }
 
@@ -560,6 +688,10 @@
     state.sessionId = null;
     state.revision = -1;
     state.snapshot = null;
+    state.align = { seq: 0, result: null, failure: null };
+    els.alignInput.value = "";
+    hideAlignError();
+    renderAlign();
     els.workspace.hidden = true;
     state.loadedSample = null;
     setConnection("idle", "未加载");
@@ -591,6 +723,23 @@
   });
 
   els.undoBtn.addEventListener("click", undo);
+
+  els.alignBtn.addEventListener("click", runAlign);
+  els.alignInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      runAlign();
+    }
+  });
+  // Editing the reference text does not clear the kept result; it marks it stale.
+  els.alignInput.addEventListener("input", renderAlign);
+  els.alignFill.addEventListener("click", () => {
+    const snap = state.snapshot;
+    if (!snap) return;
+    const best = snap.best_text || "";
+    els.alignInput.value = [...best].slice(0, 32).join("");
+    renderAlign();
+  });
 
   els.stepBtn.addEventListener("click", async () => {
     const snap = state.snapshot;
